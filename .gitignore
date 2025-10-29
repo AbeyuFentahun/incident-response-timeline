@@ -1,0 +1,44 @@
+# ===== Python & Virtual Environment =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+
+# ===== Environment Variables & Config =====
+config/.env
+config/aws_config.yml
+config/settings.yml
+
+# Keep example config (safe to share)
+!config/.env.example
+
+# ===== Logs =====
+logs/
+*.log
+
+# ===== Data =====
+data/raw/
+data/staging/
+data/archive/
+data/dead_letter/
+
+# Keep folder structure only
+!data/**/.gitkeep
+
+# ===== IDE / OS Files =====
+.vscode/
+.idea/
+.DS_Store
+
+# ===== Airflow / Docker Cache =====
+docker/airflow/logs/
+*.pid
+*.db
+*.tar
+*.bak
+
