@@ -110,3 +110,4 @@ if __name__ == "__main__":
         logger.info("Connection closed.")
     except Exception as e:
         logger.error(f"Error: {e}")
+        raise

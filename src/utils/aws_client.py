@@ -150,3 +150,4 @@ if __name__ == "__main__":
     # Catches error and logs error to the log file
     except Exception as e:
         logger.error(f"S3 setup failed: {e}")
+        raise

@@ -4,6 +4,7 @@ import json
 import datetime
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
+from src.extract.s3_uploader import upload_to_s3
 
 
 # Load environment variables from .env file into memory
@@ -26,27 +27,6 @@ logger = get_logger(__name__)
 logger.setLevel(LOG_LEVEL)
 
 
-# Timestamp instance for every file
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-# Dynamical resolve file paths
-# Get root directory
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# File path to extract mock data
-file_path = os.path.join(BASE_DIR, DATA_DIR, "raw", "mock_security_events.json")
-
-# File path to store valid mock data
-valid_output_path = os.path.join(BASE_DIR, DATA_DIR, "raw", f"mock_security_events_{timestamp}.json")
-
-# File path to store invalid mock data
-invalid_output_path = os.path.join(BASE_DIR, DATA_DIR, "dead_letter", f"mock_security_events_{timestamp}.json")
-
-# Creates directory if it doesn't exist; if it does, ignore
-os.makedirs(os.path.dirname(valid_output_path), exist_ok=True)
-os.makedirs(os.path.dirname(invalid_output_path), exist_ok=True)
-
-
 # Required fields in response
 required_fields = [
     "event_id", 
@@ -60,10 +40,28 @@ required_fields = [
 
 
 def extract_data(file):
+    # Timestamp instance for every file
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Dynamical resolve file paths
+    # Get root directory
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    # File path to store valid mock data
+    valid_output_path = os.path.join(BASE_DIR, DATA_DIR, "raw", f"mock_security_events_{timestamp}.json")
+
+    # File path to store invalid mock data
+    invalid_output_path = os.path.join(BASE_DIR, DATA_DIR, "dead_letter", f"invalid_mock_security_events_{timestamp}.json")
+
+    # Creates directory if it doesn't exist; if it does, ignore
+    os.makedirs(os.path.dirname(valid_output_path), exist_ok=True)
+    os.makedirs(os.path.dirname(invalid_output_path), exist_ok=True)
+
     # Store valid records from response
     valid_records = []
     # Store invalid records from response
     invalid_records = []
+
     try:
         with open(file, "r", encoding="utf-8") as input_file:
             # Parse JSON into Python Object
@@ -113,13 +111,13 @@ def extract_data(file):
 
     # Catch errors and logs error to the log file
     except FileNotFoundError as e:
-        logger.error(f"File not found: {file_path}")
+        logger.error(f"File not found: {file}")
         raise
     except json.JSONDecodeError as e:
         logger.error(f"JSON parsing failed: {e}")
         raise
     except PermissionError as e:
-        logger.error(f"Permission denied reading {file_path}: {e}")
+        logger.error(f"Permission denied reading {file}: {e}")
         raise
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
@@ -140,12 +138,38 @@ def extract_data(file):
 # If this file is being executed directly, run this
 # If this file is being imported, don't run this
 if __name__ == "__main__":
+
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    file_path = os.path.join(BASE_DIR, DATA_DIR, "raw", "mock_security_events.json")
+    invalid_file_path = os.path.join(BASE_DIR, DATA_DIR, "raw", "invalid_mock_security_events.json")
+
     try:
-        extract_data(file_path)
-        logger.info("Extraction completed successfully.")
+        # Extract from both datasets (valid + invalid inputs)
+        valid_path, valid_dead = extract_data(file_path)
+        invalid_path, invalid_dead = extract_data(invalid_file_path)
+
+        # Upload valid outputs from valid dataset
+        if os.path.exists(valid_path):
+            upload_to_s3(valid_path, f"raw/{os.path.basename(valid_path)}")
+
+        # Upload invalid outputs from valid dataset
+        if os.path.exists(valid_dead):
+            upload_to_s3(valid_dead, f"dead_letter/{os.path.basename(valid_dead)}")
+
+        # Upload valid outputs from invalid dataset
+        if os.path.exists(invalid_path):
+            upload_to_s3(invalid_path, f"raw/{os.path.basename(invalid_path)}")
+
+        # Upload invalid outputs from invalid dataset
+        if os.path.exists(invalid_dead):
+            upload_to_s3(invalid_dead, f"dead_letter/{os.path.basename(invalid_dead)}")
+
+        logger.info("Extraction and S3 upload completed successfully.")
+
     except Exception:
         logger.exception("Extraction failed.")
         raise
+
 
     
 
