@@ -7,54 +7,30 @@ from datetime import datetime
 from src.utils.db_connection import get_connection
 from src.utils.logger import get_logger
 
-
-
-# Load environmental variables in OS memory
+# Load environment variables into OS memory
 load_dotenv("config/.env")
 
-# Access environmental variables
+# Access environment variables
 DATA_DIR = os.getenv("DATA_DIR")
-LOG_LEVEL = os.getenv("LOG_LEVEL")
 
-# Initialize logger and set its level based on .env
-# __name__ ensures logs identify which module generated the message (e.g., src.utils.db_connection)
+# If LOG_LEVEL is missing or lowercase, normalize it so logger.setLevel() never breaks
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Initialize logger
 logger = get_logger(__name__)
 logger.setLevel(LOG_LEVEL)
 
-# Dynamical resolve file path
+# Dynamically resolve base directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# Create path to directory
+
+# Directories
 valid_directory_path = os.path.join(BASE_DIR, DATA_DIR, "raw")
 invalid_directory_path = os.path.join(BASE_DIR, DATA_DIR, "dead_letter")
 
-
-
-# Allows us to check if the file contains a timestamp
-# Used re module because "in" compares exact text, not pattern
+# Regex pattern to match timestamps in filenames (YYYYMMDD_HHMMSS)
 pattern = r"\d{8}_\d{6}"
 
-# Loops through directory to see if the file contains a timestamp
-valid_file_list = [file for file in os.listdir(valid_directory_path) if re.search(pattern, file)]
-invalid_file_list = [file for file in os.listdir(invalid_directory_path) if re.search(pattern, file)]
-
-# Sorts valid files by most recent timestamp
-valid_files = sorted(
-    valid_file_list,
-    key=lambda f: datetime.strptime(re.search(pattern, f).group(), "%Y%m%d_%H%M%S"),
-    reverse=True
-)
-
-# Sort invalid files by most recent timestamp
-invalid_files = sorted(
-    invalid_file_list,
-    # Check if file contains timestamp
-    # Extracts timestamp found in re.search
-    # Turns the string into a actual datetime object
-    key=lambda f: datetime.strptime(re.search(pattern, f).group(), "%Y%m%d_%H%M%S"),
-    reverse=True
-)
-
-# Query to insert data into Postgre
+# SQL query
 INSERT_QUERY = '''
 INSERT INTO raw.security_logs (
     event_id,
@@ -77,62 +53,175 @@ VALUES (
 ON CONFLICT (event_id) DO NOTHING;
 '''
 
+# Helper: returns sorted list of timestamped files (newest → oldest)
+def get_timestamped_files(directory_path):
+    try:
+        file_list = [file for file in os.listdir(directory_path) if re.search(pattern, file)]
+    except Exception as e:
+        logger.error(f"Could not list files in {directory_path}: {e}")
+        return []
+
+    sorted_files = sorted(
+        file_list,
+        key=lambda f: datetime.strptime(
+            re.search(pattern, f).group(), "%Y%m%d_%H%M%S"
+        ),
+        reverse=True
+    )
+
+    return sorted_files
+
+
 def load_json_to_postgres():
-    conn = get_connection()
-    cursor = conn.cursor()
 
-    # Valid files processing
-    for file in valid_files:
-        try:
-            with open(os.path.join(valid_directory_path, file), "r", encoding="utf") as f:
-                valid_data = json.load(f)
+    conn = None
+    cursor = None
 
-            print("Valid Data being read!")
-            print(valid_data)
-            print("Valid Data read successfully!")
-            
-            # Stages changes to DB
-            # Send insert comamand to DB to prepare for changes
-            # Holds it in a temporary transaction buffer
-            cursor.execute(
-                INSERT_QUERY,               
-                   {
-                       "event_id": valid_data["event_id"],
-                       "event_time": valid_data["timestamp"],
-                       "source": valid_data["source_ip"],
-                       "severity": valid_data["severity"],
-                       "message": valid_data["description"],
-                       "raw_payload": valid_data  
-                    }
-            )
+    try:
+        conn = get_connection()  # DB connection (SSL enabled if configured)
+        cursor = conn.cursor()
 
-            # Actually commits the changes to he DB
-            conn.commit()
+        # Get fresh file lists at runtime
+        valid_files = get_timestamped_files(valid_directory_path)
+        invalid_files = get_timestamped_files(invalid_directory_path)
 
+        # VALID FILE PROCESSING
+        for file in valid_files:
+            valid_file_path = os.path.join(valid_directory_path, file)
 
-        except Exception as e:
-            print(f"Error: {e}")
-            # Undoes everything since the last commit
-            conn.rollback()
-            continue # Skip to next file in loop
-
-
-
-
-    # Invalid files processing
-    for file in invalid_files:
             try:
-                with open(os.path.join(invalid_directory_path, file), "r", encoding="utf") as f:
-                    invalid_data = json.load(f)
+                # Read the JSON file
+                with open(valid_file_path, "r", encoding="utf-8") as f:
+                    valid_data = json.load(f)
 
-                print("Invalid Data being read!")
-                print(invalid_data)
-                print("Invalid Data read successfully!")
+                # Must be list because extract step always writes lists
+                if not isinstance(valid_data, list):
+                    logger.error(
+                        f"Expected list of records in {valid_file_path}, but got {type(valid_data)}. Skipping."
+                    )
+                    continue
 
+                logger.info(
+                    f"Valid file loaded: {valid_file_path} — Records found: {len(valid_data)}"
+                )
+
+                # Fail fast: valid_data should never be empty
+                if len(valid_data) == 0:
+                    logger.error(f"No valid records found in {valid_file_path}. Failing fast.")
+                    raise ValueError("Zero valid records — load step aborted.")
+
+                # Track file-level insertion statistics
+                insert_count = 0
+                skip_count = 0     # duplicates
+                error_count = 0
+
+                # Process records inside this file
+                for record in valid_data:
+                    try:
+                        # TIMESTAMP NORMALIZATION
+                        # Extract timestamp (ISO-8601 from EXTRACT step)
+                        ts = record["timestamp"]
+
+                        # If it ends with 'Z', convert to +00:00 offset format
+                        # Postgres handles this more consistently
+                        if ts.endswith("Z"):
+                            ts = ts[:-1] + "+00:00"
+
+                        # Convert normalized string → datetime object
+                        # This ensures Postgres always gets a valid timestamp
+                        event_time = datetime.fromisoformat(ts)
+                        # -----------------------------------------
+
+                        # Insert into DB
+                        cursor.execute(
+                            INSERT_QUERY,
+                            {
+                                "event_id": record["event_id"],
+                                "event_time": event_time,    # Use normalized timestamp
+                                "source": record["source_ip"],
+                                "severity": record["severity"],
+                                "message": record["description"],
+
+                                # raw_payload must be JSON, NOT a Python dict.
+                                # json.dumps() converts Python dict → JSON string,
+                                # which Postgres can accept as JSON/JSONB.
+                                "raw_payload": json.dumps(record)
+                            }
+                        )
+
+                        # ON CONFLICT DO NOTHING makes duplicates invisible to rowcount
+                        if cursor.rowcount == 0:
+                            skip_count += 1
+                        else:
+                            insert_count += 1
+
+                    except Exception as e:
+                        logger.error(
+                            f"Record-level error in {valid_file_path}: {e}"
+                        )
+                        error_count += 1
+                        break  # Stop processing this file
+
+                if error_count == 0:
+                    # Only commit if file succeeded 
+                    conn.commit()
+                    logger.info(f"Committed file successfully: {valid_file_path}")
+                else:
+                    # Roll back everything from this file (file-level atomicity)
+                    conn.rollback()
+                    logger.error(
+                        f"File {valid_file_path} rolled back due to {error_count} record-level errors."
+                    )
+                    continue  # Skip to next file
+
+                # Summary log for each file
+                logger.info(
+                    f"Load summary for {valid_file_path} → "
+                    f"Inserted: {insert_count}, "
+                    f"Skipped (duplicates): {skip_count}, "
+                    f"Errors: {error_count}"
+                )
 
             except Exception as e:
-                print(f"Error: {e}")
+                logger.error(f"Error processing file {valid_file_path}: {e}")
+                conn.rollback()
+                raise # raise error to Airflow
+
+        # INVALID FILE PROCESSING — dead_letter
+        for file in invalid_files:
+            invalid_file_path = os.path.join(invalid_directory_path, file)
+
+            try:
+                with open(invalid_file_path, "r", encoding="utf-8") as f:
+                    invalid_data = json.load(f)
+
+                if isinstance(invalid_data, list):
+                    logger.warning(
+                        f"Invalid file processed (dead_letter): {invalid_file_path} "
+                        f"Invalid records: {len(invalid_data)}"
+                    )
+                else:
+                    logger.warning(
+                        f"Invalid file {invalid_file_path} does not contain a list. Possible extract error."
+                    )
+
+            except Exception as e:
+                logger.error(f"Error reading invalid file {invalid_file_path}: {e}")
                 continue
 
-    # Closes connection after executing
-    conn.close()
+    except Exception as e:
+        logger.error(f"Unexpected failure during load step: {e}")
+        raise
+
+    finally:
+        # Always executed, even if an exception is raised
+        if cursor is not None:
+            cursor.close()
+            logger.info("PostgreSQL cursor closed.")
+
+        if conn is not None:
+            conn.close()
+            logger.info("PostgreSQL connection closed.")
+
+
+

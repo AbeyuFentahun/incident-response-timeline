@@ -1,5 +1,5 @@
-# Run script in terminal: python3 -m src.utils.db_connection
-# python3 says Find and run the module called src.utils.db_connection from the project root.
+# Run script in terminal: python3 -m src.utils.logger
+# python3 says Find and run the module called src.utils.logger from the project root.
 import logging
 import time
 import os
