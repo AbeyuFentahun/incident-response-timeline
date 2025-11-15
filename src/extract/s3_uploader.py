@@ -57,6 +57,9 @@ def upload_to_s3(local_path, s3_key):
 
         logger.info(f"Uploading file → {local_path} → s3://{S3_BUCKET}/{s3_key}")
         # Uploads data into the specified S3 key within the bucket
+        # local_path tells which file to upload
+        # s3_bucket tells which s3 bucket to upload it to
+        # s3_key tells which key to upload the data as a value 
         s3.upload_file(local_path, S3_BUCKET, s3_key)
         logger.info(f"File uploaded successfully: s3://{S3_BUCKET}/{s3_key}")
 

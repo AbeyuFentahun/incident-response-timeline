@@ -5,6 +5,8 @@ import datetime
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
 from src.extract.s3_uploader import upload_to_s3
+from src.validation.validation_raw_events import validate_raw_event
+
 
 
 # Load environment variables from .env file into memory
@@ -87,8 +89,20 @@ def extract_data(file):
                         }
                     )
                 else:
-                    # If fields exists, append the record to valid records list
-                    valid_records.append(record)
+            
+                    try:
+                        # Run full validation
+                        validate_raw_event(record)
+                        # If fields exists, append the record to valid records list
+                        valid_records.append(record)
+                    except ValueError as e:
+                        invalid_records.append(
+                        {
+                            "record_id": record.get("event_id", "<no_id>"),
+                            "error": str(e),
+                            "record": record
+                        }
+                    )
 
 
             # If valid records exist, create a new file and write the valid records to the new file   

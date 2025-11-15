@@ -81,16 +81,21 @@ def load_json_to_postgres():
     conn = get_connection()
     cursor = conn.cursor()
 
-    try:
-        for file in valid_files:
+    # Valid files processing
+    for file in valid_files:
+        try:
             with open(os.path.join(valid_directory_path, file), "r", encoding="utf") as f:
                 valid_data = json.load(f)
+
             print("Valid Data being read!")
             print(valid_data)
             print("Valid Data read successfully!")
             
-            cursor.execute(INSERT_QUERY,
-                   
+            # Stages changes to DB
+            # Send insert comamand to DB to prepare for changes
+            # Holds it in a temporary transaction buffer
+            cursor.execute(
+                INSERT_QUERY,               
                    {
                        "event_id": valid_data["event_id"],
                        "event_time": valid_data["timestamp"],
@@ -101,21 +106,33 @@ def load_json_to_postgres():
                     }
             )
 
-        for file in invalid_files:
-            with open(os.path.join(invalid_directory_path, file), "r", encoding="utf") as f:
-                invalid_data = json.load(f)
-            print("Invalid Data being read!")
-            print(invalid_data)
-            print("Invalid Data read successfully!")
+            # Actually commits the changes to he DB
+            conn.commit()
 
-    except Exception as e:
-        print(f"Error: {e}")
 
-    finally:
-        conn.close()
+        except Exception as e:
+            print(f"Error: {e}")
+            # Undoes everything since the last commit
+            conn.rollback()
+            continue # Skip to next file in loop
 
 
 
 
-load_json_to_postgres()
+    # Invalid files processing
+    for file in invalid_files:
+            try:
+                with open(os.path.join(invalid_directory_path, file), "r", encoding="utf") as f:
+                    invalid_data = json.load(f)
 
+                print("Invalid Data being read!")
+                print(invalid_data)
+                print("Invalid Data read successfully!")
+
+
+            except Exception as e:
+                print(f"Error: {e}")
+                continue
+
+    # Closes connection after executing
+    conn.close()
