@@ -89,7 +89,7 @@ def extract_data(file):
                         }
                     )
                 else:
-            
+                    
                     try:
                         # Run full validation
                         validate_raw_event(record)
