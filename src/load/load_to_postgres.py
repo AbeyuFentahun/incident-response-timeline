@@ -223,5 +223,11 @@ def load_json_to_postgres():
             conn.close()
             logger.info("PostgreSQL connection closed.")
 
-
+# Smoke test to see if eveyrhting r
+if __name__ == "__main__":
+    try:
+        load_json_to_postgres()
+        logger.info("Load JSON to Postgres Successful!")
+    except Exception as e:
+        logger.error(f"Error occured when loading into Postgres: {e}.")
 

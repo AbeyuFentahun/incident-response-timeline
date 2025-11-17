@@ -15,7 +15,7 @@ load_dotenv("config/.env")
 # LOG_LEVEL allows us to dynamically control which events are logged based on severity (INFO, DEBUG, ERROR, etc.)
 # ENVIRONMENT helps differentiate between environments like local, staging, or production for contextual logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-ENVIRONMENT = os.getenv("ENVIRONMENT", "local")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "local").lower()
 
 
 # Initialize logger and set its level based on .env
