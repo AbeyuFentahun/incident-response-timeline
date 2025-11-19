@@ -1,7 +1,7 @@
 # Run this script in the terminal using: python3 -m src.extract.extract_security_events
 import os
 import json
-import datetime
+from datetime import datetime
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
 from src.extract.s3_uploader import upload_to_s3
@@ -40,20 +40,22 @@ required_fields = [
     "description"
     ]
 
+# Dynamical resolve file paths
+# Get root directory
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def extract_data(file):
     # Timestamp instance for every file
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_input_name = os.path.splitext(os.path.basename(file))[0]
 
-    # Dynamical resolve file paths
-    # Get root directory
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+    
     # File path to store valid mock data
-    valid_output_path = os.path.join(BASE_DIR, DATA_DIR, "raw", f"mock_security_events_{timestamp}.json")
+    valid_output_path = os.path.join(BASE_DIR, DATA_DIR, "raw", f"{base_input_name}_{timestamp}.json")
+
 
     # File path to store invalid mock data
-    invalid_output_path = os.path.join(BASE_DIR, DATA_DIR, "dead_letter", f"invalid_mock_security_events_{timestamp}.json")
+    invalid_output_path = os.path.join(BASE_DIR, DATA_DIR, "dead_letter", f"{base_input_name}_invalid_{timestamp}.json")
 
     # Creates directory if it doesn't exist; if it does, ignore
     os.makedirs(os.path.dirname(valid_output_path), exist_ok=True)
@@ -85,7 +87,8 @@ def extract_data(file):
                     invalid_records.append(
                         {
                             "record_id": record.get("event_id", "<no_id>"),
-                            "missing_keys": missing
+                            "missing_keys": missing,
+                            "record": record
                         }
                     )
                 else:
@@ -153,7 +156,6 @@ def extract_data(file):
 # If this file is being imported, don't run this
 if __name__ == "__main__":
 
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     file_path = os.path.join(BASE_DIR, DATA_DIR, "raw", "mock_security_events.json")
     invalid_file_path = os.path.join(BASE_DIR, DATA_DIR, "raw", "invalid_mock_security_events.json")
 

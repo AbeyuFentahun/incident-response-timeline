@@ -2,8 +2,8 @@
 import os
 import re
 import json
-from dotenv import load_dotenv
 from datetime import datetime
+from dotenv import load_dotenv
 from src.utils.db_connection import get_connection
 from src.utils.logger import get_logger
 
@@ -60,6 +60,11 @@ def get_timestamped_files(directory_path):
     except Exception as e:
         logger.error(f"Could not list files in {directory_path}: {e}")
         return []
+    
+    # Makes sure the list isn't empty
+    if not file_list:
+        logger.error(f"No timestamped files found in {directory_path}")
+        return []
 
     sorted_files = sorted(
         file_list,
@@ -84,6 +89,12 @@ def load_json_to_postgres():
         # Get fresh file lists at runtime
         valid_files = get_timestamped_files(valid_directory_path)
         invalid_files = get_timestamped_files(invalid_directory_path)
+        
+        # Safe guard against empty valid files list 
+        if not valid_files:
+            logger.error("No raw files available to load into PostgreSQL.")
+            raise ValueError("No raw files found — load aborted.")
+
 
         # VALID FILE PROCESSING
         for file in valid_files:
@@ -223,7 +234,7 @@ def load_json_to_postgres():
             conn.close()
             logger.info("PostgreSQL connection closed.")
 
-# Smoke test to see if eveyrhting r
+# Smoke test to see if everything loads to PostgreSQL DB
 if __name__ == "__main__":
     try:
         load_json_to_postgres()

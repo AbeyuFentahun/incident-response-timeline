@@ -81,7 +81,7 @@ def upload_to_s3(local_path, s3_key):
         raise
 
 
-# Allows you to run smoke tests on the db connection whenever this file is executed directly
+# Allows you to run a standalone S3 upload smoke test
 # If this file is being executed directly run this
 # If this file is being imported don't run this
 if __name__ == "__main__":
