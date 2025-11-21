@@ -1,3 +1,4 @@
+# Run this script in the terminal using: python3 -m src.validation.validate_raw_events
 from datetime import datetime, timezone
 import re
 import json
