@@ -27,13 +27,18 @@ optional_string_fields = [
 # Allowed values
 allowed_severity = {"low", "medium", "high", "critical"}
 allowed_event_types = {
-    "login_attempt",
-    "file_access",
-    "network_connection",
+    "unauthorized_login",
+    "malware_detected",
     "port_scan",
-    "malware_detection",
-    "intrusion_attempt"
+    "brute_force",
+    "policy_violation",
+    "dns_tunnel_detected",
+    "data_exfiltration",
+    "unauthorized_access",
+    "phishing_click",
+    "firewall_block",
 }
+
 
 
 # Validates and normalizes an incoming raw security event.
