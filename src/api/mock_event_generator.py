@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import random
 
-
+#=================================== VALID EVENTS GENERATOR =========================================#
 # Allowed values
 allowed_severity = ["low", "medium", "high", "critical"]
 
@@ -109,4 +109,42 @@ def generate_valid_event():
     }
 
 
-print(generate_valid_event())
+
+#=================================== INVALID EVENTS GENERATOR =========================================#
+def generate_invalid_event():
+    event = generate_valid_event()
+
+    # Chooses the type of corruption
+    corruption = random.choice([
+        "missing_field",
+        "bad_source_ip",
+        "bad_destination_ip",
+        "bad_timestamp",
+        "bad_type"
+    ])
+
+    # Missing field corruption
+    if corruption == "missing_field":
+        missing_field = ["timestamp",  "source_ip", "destination_ip","event_type","severity", "description"]
+        event.pop(random.choice(missing_field))
+
+    # Corrupt source ip 
+    elif corruption == "bad_source_ip":
+        event["source_ip"] = "999.999.999.999"
+
+    # Corrupt destination ip
+    elif corruption == "bad_destination_ip":
+        event["destination_ip"] = "999.999.999.999"
+
+    # Corrupt timestamp
+    elif corruption == "bad_timestamp":
+        event["timestamp"] = "BAD_TIMESTAMP"
+
+    # Corrupt event type
+    elif corruption == "bad_type":
+        event["event_type"] = "UNKNOWN_TYPE"
+
+    return event
+
+
+
