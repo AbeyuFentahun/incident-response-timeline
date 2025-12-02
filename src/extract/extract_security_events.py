@@ -1,193 +1,152 @@
-# Run this script in the terminal using: python3 -m src.extract.extract_security_events
+# 1. Identify the source the requests will be made to
+# 2. Test the connection
+# 3. Extract data
+# 4. Validate data
+# 5. Save data to the preferred destination
+
+
+# Run this script in terminal: python3 -m src.extract.extract_security_events1
 import os
+import requests
 import json
 from datetime import datetime
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
-from src.extract.s3_uploader import upload_to_s3
-from src.validation.validation_raw_events import validate_raw_event
 
 
-
-# Load environment variables from .env file into memory
+# Load environmental variables into OS memory
 load_dotenv("config/.env")
 
-
-# Load LOG_LEVEL and ENVIRONMENT vars from .env
-# Log levels are essentially labels that indicate the severity or urgency of the various events in your application
-# LOG_LEVEL allows us to dynamically control which events are logged based on severity (INFO, DEBUG, ERROR, etc.)
-# ENVIRONMENT helps differentiate between environments like local, staging, or production for contextual logging
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-ENVIRONMENT = os.getenv("ENVIRONMENT", "local").lower()
+# Access environmental variables
+LOG_LEVEL = os.getenv("LOG_LEVEL")
+ENVIRONMENT = os.getenv("ENVIRONMENT")
 DATA_DIR = os.getenv("DATA_DIR")
+API_BASE_URL = os.getenv("API_BASE_URL")
+API_KEY = os.getenv("API_KEY")
 
 
-
-# Initialize logger and set its level based on .env
-# __name__ ensures logs identify which module generated the message (e.g., src.utils.db_connection)
+# Initialize get_logger()
+# Set logging level
 logger = get_logger(__name__)
 logger.setLevel(LOG_LEVEL)
-
-
-# Required fields in response
-required_fields = [
-    "event_id", 
-    "timestamp", 
-    "source_ip", 
-    "destination_ip", 
-    "event_type", 
-    "severity", 
-    "description"
-    ]
 
 # Dynamical resolve file paths
 # Get root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def extract_data(file):
-    # Timestamp instance for every file
+
+# ENDPOINT FOR API that request will be made to
+url = f"{API_BASE_URL}/events/batch"
+# HEADER FOR AUTHORIZED USER / REQUESTS
+headers = {"x-api-key": API_KEY}
+
+
+# Creates directory if it doesn't exist; if it does, ignore
+os.makedirs(os.path.join(BASE_DIR, "data", "raw"), exist_ok=True)
+
+
+# Required keys in response
+required_response_fields = [
+    "events",
+    "size",
+    "fault_rate",
+    "valid_events",
+    "invalid_events"
+]
+
+
+def extract_data(size, fault_rate):
+
+    # Timestamp instance for files
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_input_name = os.path.splitext(os.path.basename(file))[0]
+    # Dynamically resolves file path to data/raw
+    raw_output_path = os.path.join(BASE_DIR, DATA_DIR, "raw", f"raw_events_{timestamp}.json")
+
+
+    # Check if query paramters are valid
+    if size < 1:
+        raise ValueError("Size must be >= 1")
+    if not (0.0 <= fault_rate <= 1.0):
+        raise ValueError("fault_rate must be between 0.0 and 1.0")
+    
+    # paramters
+    params = {"size" : size, "fault_rate" : fault_rate}
+
+    # GET request to API endpoints
+    response = requests.get(url, headers=headers, params=params)
+
+    # Checks GET request status code to see if it was successful or unsuccessful
+    if response.status_code != 200:
+        print(f"API request UNSUCCESFUL")
+        raise ValueError(f"API request UNSUCCESFUL {response.status_code}")
+    
+    # Convert API response (JSON TEXT) into Python Object
+    data = response.json()
+
+
+    # Make sure response is a dictionary
+    if not isinstance(data, dict):
+        raise ValueError(f"Data needs to be an object. Current Data Type is: {type(data)}")
+    
+    # List comprehension
+    # Checks if there any missing keys in response
+    missing_keys = [key for key in required_response_fields if key not in data]
+    
+    if missing_keys:
+        print(f"Missing keys in response: {missing_keys}")
+        raise ValueError("Missing keys in response")
+    
+    
+    # Makes sure data["events"] is a list
+    if not isinstance(data["events"], list):
+        raise ValueError(f"events needs to be an list. Current Data Type is: {type(data['events'])}")
+    
+    # Make sure data["size"] is a int
+    if not isinstance(data["size"], int):
+        raise ValueError(f"size needs to be an int. Current Data Type is: {type(data['size'])}")
+    
+    # Make sure data["valid_events"] is an int
+    if not isinstance(data["valid_events"], int):
+        raise ValueError(f"valid_events needs to be an int. Current Data Type is: {type(data['valid_events'])}")
+    
+    # Make sure data["invalid_events"] is a int
+    if not isinstance(data["invalid_events"], int):
+        raise ValueError(f"invalid_events needs to be an int. Current Data Type is: {type(data['invalid_events'])}")
+    
+    # Safe float comparison with tolerance
+    tolerance = 1e-6
+    if not isinstance(data["fault_rate"], (int, float)):
+        raise ValueError(f"fault_rate needs to be a float. Current Data Type is {type(data['fault_rate'])}")
+
+    if abs(data["fault_rate"] - fault_rate) > tolerance:
+        raise ValueError(
+        f"fault_rate mismatch. Sent: {fault_rate}, Received: {data['fault_rate']}"
+            )
 
     
-    # File path to store valid mock data
-    valid_output_path = os.path.join(BASE_DIR, DATA_DIR, "raw", f"{base_input_name}_{timestamp}.json")
+    # write data to data/raw/f"raw_events_{timestamp}.json"
+    with open(raw_output_path, "w", encoding="utf-8") as f:
+        # write json data to file
+        json.dump(data, f, indent=4)
 
 
-    # File path to store invalid mock data
-    invalid_output_path = os.path.join(BASE_DIR, DATA_DIR, "dead_letter", f"{base_input_name}_invalid_{timestamp}.json")
-
-    # Creates directory if it doesn't exist; if it does, ignore
-    os.makedirs(os.path.dirname(valid_output_path), exist_ok=True)
-    os.makedirs(os.path.dirname(invalid_output_path), exist_ok=True)
-
-    # Store valid records from response
-    valid_records = []
-    # Store invalid records from response
-    invalid_records = []
-
-    try:
-        with open(file, "r", encoding="utf-8") as input_file:
-            # Parse JSON into Python Object
-            data = json.load(input_file)
-            if not isinstance(data, list):
-                logger.error(f"Unexpected JSON structure: expected list, got {type(data)}")
-                raise ValueError("Invalid JSON structure")
-
-            logger.info("JSON parsed into Python Object")
-            # Loops through the list of objects in Python Object
-            for record in data:
-                # Creates a list
-                # Checks if the field in required_field exists in the current record in data
-                # Recreated during each iteration
-                # Loops through record before executing the if statement
-                missing = [field for field in required_fields if field not in record]
-                # if field(s) missing, append to the invalid record list
-                if missing:
-                    invalid_records.append(
-                        {
-                            "record_id": record.get("event_id", "<no_id>"),
-                            "missing_keys": missing,
-                            "record": record
-                        }
-                    )
-                else:
-                    
-                    try:
-                        # Run full validation
-                        validate_raw_event(record)
-                        # If fields exists, append the record to valid records list
-                        valid_records.append(record)
-                    except ValueError as e:
-                        invalid_records.append(
-                        {
-                            "record_id": record.get("event_id", "<no_id>"),
-                            "error": str(e),
-                            "record": record
-                        }
-                    )
-
-
-            # If valid records exist, create a new file and write the valid records to the new file   
-            if valid_records:
-                with open(valid_output_path, "w", encoding="utf-8") as valid_file:
-                        json.dump(valid_records, valid_file, indent=2)
-                        logger.info(f"{len(valid_records)} valid records written to {valid_output_path}")
-            else:
-                logger.error("No Valid Records found. Extraction aborted.")
-                raise ValueError("No valid records found in the dataset.")
-
-
-            
-            # If invalid records exist, create a new file and write the invalid records to the new file   
-            if invalid_records:
-                with open(invalid_output_path, "w", encoding="utf-8") as invalid_file:
-                    json.dump(invalid_records, invalid_file, indent=2)
-                logger.info(f"{len(invalid_records)} invalid records written to {invalid_output_path}")
-
-
-    # Catch errors and logs error to the log file
-    except FileNotFoundError as e:
-        logger.error(f"File not found: {file}")
-        raise
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON parsing failed: {e}")
-        raise
-    except PermissionError as e:
-        logger.error(f"Permission denied reading {file}: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        raise
-
-    # Logs how many records were processed
-    logger.info(
-        f"Extraction summary → total: {len(data)}, "
-        f"valid: {len(valid_records)}, invalid: {len(invalid_records)}"
-    )
-
-    # Return paths so you can dynamically receive, reuse, and pass them between stages
-    return valid_output_path, invalid_output_path
-
-
-
-# Allows you to run smoke tests on the db connection whenever this file is executed directly
-# If this file is being executed directly, run this
-# If this file is being imported, don't run this
+    # Return data
+    return data
+    
+    
+# Smoke test
 if __name__ == "__main__":
+    print("Extracting data from API")
+    data = extract_data(5, .20)
+    print("Response succesful and Data returned")
+    print(data)
 
-    file_path = os.path.join(BASE_DIR, DATA_DIR, "raw", "mock_security_events.json")
-    invalid_file_path = os.path.join(BASE_DIR, DATA_DIR, "raw", "invalid_mock_security_events.json")
-
-    try:
-        # Extract from both datasets (valid + invalid inputs)
-        valid_path, valid_dead = extract_data(file_path)
-        invalid_path, invalid_dead = extract_data(invalid_file_path)
-
-        # Upload valid outputs from valid dataset
-        if os.path.exists(valid_path):
-            upload_to_s3(valid_path, f"raw/{os.path.basename(valid_path)}")
-
-        # Upload invalid outputs from valid dataset
-        if os.path.exists(valid_dead):
-            upload_to_s3(valid_dead, f"dead_letter/{os.path.basename(valid_dead)}")
-
-        # Upload valid outputs from invalid dataset
-        if os.path.exists(invalid_path):
-            upload_to_s3(invalid_path, f"raw/{os.path.basename(invalid_path)}")
-
-        # Upload invalid outputs from invalid dataset
-        if os.path.exists(invalid_dead):
-            upload_to_s3(invalid_dead, f"dead_letter/{os.path.basename(invalid_dead)}")
-
-        logger.info("Extraction and S3 upload completed successfully.")
-
-    except Exception:
-        logger.exception("Extraction failed.")
-        raise
 
 
     
+
+    
+
 
 
 
