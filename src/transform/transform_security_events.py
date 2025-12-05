@@ -7,8 +7,6 @@ from dotenv import load_dotenv
 from src.utils.logger import get_logger
 
 
-
-
 # Load environment variables from .env file into memory
 load_dotenv("config/.env")
 
@@ -43,11 +41,13 @@ print(timestamp)
 # Helper: returns sorted list of timestamped files (newest → oldest)
 def get_timestamped_files(directory_path):
     try:
-        raw_files = [file for file in os.listdir(directory_path) if re.search(pattern, file)]
+        raw_files = [
+            file for file in os.listdir(directory_path) if re.search(pattern, file)
+        ]
     except Exception as e:
         logger.error(f"Could not list files in {directory_path}: {e}")
         return []
-    
+
     # Makes sure the list isn't empty
     if not raw_files:
         logger.error(f"No timestamped files found in {directory_path}")
@@ -56,30 +56,28 @@ def get_timestamped_files(directory_path):
     sorted_raw_files = sorted(
         raw_files,
         # Returns the pattern match and turns it into a datetime object
-        key=lambda f: datetime.strptime(
-            re.search(pattern, f).group(), "%Y%m%d_%H%M%S"
-        ),
-        reverse=True
+        key=lambda f: datetime.strptime(re.search(pattern, f).group(), "%Y%m%d_%H%M%S"),
+        reverse=True,
     )
 
     return sorted_raw_files
 
+
 def transform_security_events():
     # Run helper function to get sorted raw files list
     raw_files = get_timestamped_files(raw_dir_path)
-    
+
     # Safe guard against empty list
     if not raw_files:
         print("No raw files available for transformation.")
         raise ValueError("No raw files available — transform step aborted.")
-    
+
     # Find most recent raw files
     latest_file = raw_files[0]
     # Dynamically creates raw file path
     raw_file_path = os.path.join(raw_dir_path, latest_file)
     # Stores transformed records
     transformed_records = []
-
 
     try:
         with open(raw_file_path, "r", encoding="utf-8") as f:
@@ -88,9 +86,13 @@ def transform_security_events():
 
         # Make sure resposne is a list
         if not isinstance(raw_data, list):
-            print(f"Expected list of records in {raw_file_path}, but got {type(raw_data)}.")
-            raise ValueError(f"Expected list of records in {raw_file_path}, but got {type(raw_data)}.")
-        
+            print(
+                f"Expected list of records in {raw_file_path}, but got {type(raw_data)}."
+            )
+            raise ValueError(
+                f"Expected list of records in {raw_file_path}, but got {type(raw_data)}."
+            )
+
         # Fail fast: Make sure list is not empty
         if len(raw_data) == 0:
             print(f"No valid records found in {raw_file_path}. Failing fast.")
@@ -112,26 +114,8 @@ def transform_security_events():
             except Exception as e:
                 print(f"Error: {e}")
 
-
-
-        
-
-
-
     except Exception as e:
         print(f"Error: {e}")
-        
-    
-
-
-
-
-
-
-
-
-    
-
 
 
 # Locate and load the RAW files (from local or S3)

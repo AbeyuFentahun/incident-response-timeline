@@ -4,16 +4,20 @@ import logging
 import time
 import os
 import datetime
-import inspect 
-from dotenv import load_dotenv 
+import inspect
+from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 
-# Load environment variables from .env file into memory
+
+
+# Load environment variables from .env file into OS memory
 load_dotenv("config/.env")
+# Access env variables from OS memory
 ENVIRONMENT = os.getenv("ENVIRONMENT", "local").lower()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# Creates the logic and functionality to create logs. 
+
+# Creates the logic and functionality to create logs.
 # This allows us to call the function without having to rewrite it multiple times
 # Parameter can be equal to None
 def get_logger(name=None):
@@ -33,27 +37,29 @@ def get_logger(name=None):
             name = module.__name__
         else:
             # Fallback: derive from relative file path
-            name = os.path.splitext(os.path.relpath(frame.filename, start=os.getcwd()))[0]
+            name = os.path.splitext(os.path.relpath(frame.filename, start=os.getcwd()))[
+                0
+            ]
             name = name.replace(os.sep, ".")  # Convert path -> module style
 
-   # Derive the log path dynamically from the module name
+    # Derive the log path dynamically from the module name
     log_path = name.replace("src.", "").replace(".", "/")
 
     # Base directory (project root)
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    BASE_DIR = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
     log_dir = os.path.join(BASE_DIR, "logs", os.path.dirname(log_path))
     os.makedirs(log_dir, exist_ok=True)
 
     # Use one persistent file per module (no timestamp)
     log_file = os.path.join(log_dir, f"{os.path.basename(log_path)}.log")
 
-
-
     # Make sure directory/file path exists before logging
     # If it doesn't exist create the directory/file path
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
-    # It prevents duplicate logger objects by checking if it logger object exists from the memory, if it does exist, return the logger object, 
+    # It prevents duplicate logger objects by checking if it logger object exists from the memory, if it does exist, return the logger object,
     # If it doesn't exist, create the logger object
     logger = logging.getLogger(name)
     # Filters what will be written in my log files
@@ -69,8 +75,8 @@ def get_logger(name=None):
     if not logger.handlers:
         # Determines how the log will look
         formatter = logging.Formatter(
-            "%(asctime)s | %(name)s | %(levelname)s | %(message)s", 
-            datefmt="%Y-%m-%d %H:%M:%S"
+            "%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
         formatter.converter = time.gmtime  # force UTC timestamps
 
@@ -91,6 +97,6 @@ def get_logger(name=None):
         stream_handler.setFormatter(formatter)
         # Tells where the log will be written through the stream handler variable and connect it (writes it the console)
         logger.addHandler(stream_handler)
-    
+
     # return logger object so it can be used in the other modules so no set up is required
     return logger

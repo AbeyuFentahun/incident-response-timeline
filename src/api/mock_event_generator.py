@@ -1,10 +1,9 @@
 # Run this script in terminal: python3 src/api/mock_event_generator.py
 import uuid
-# timedelta used to store time interval
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta # timedelta used to store time interval
 import random
 
-#=================================== VALID EVENTS GENERATOR =========================================#
+# =================================== VALID EVENTS GENERATOR =========================================#
 # Allowed values
 allowed_severity = ["low", "medium", "high", "critical"]
 
@@ -43,7 +42,7 @@ def generate_unique_event_id():
     return event_id
 
 
-# Generate timestamp for security events   
+# Generate timestamp for security events
 def generate_timestamp():
     now = datetime.now(timezone.utc)
     # Subtract a random number of minutes to simulate realistic event timing
@@ -87,17 +86,13 @@ def generate_random_severity():
 # Generate random description
 def generate_random_description(event_type):
     # Return description if the event type exists, otherwise use fallback
-    return event_descriptions.get(
-        event_type,
-        "Suspicious activity detected."
-    )
-
+    return event_descriptions.get(event_type, "Suspicious activity detected.")
 
 
 # Generate valid security events
 def generate_valid_event():
-    event_type = generate_event_type() # Generate event type
-    
+    event_type = generate_event_type()  # Generate event type
+
     return {
         "event_id": generate_unique_event_id(),
         "timestamp": generate_timestamp(),
@@ -105,30 +100,38 @@ def generate_valid_event():
         "destination_ip": generate_private_ip(),
         "event_type": event_type,
         "severity": generate_random_severity(),
-        "description": generate_random_description(event_type)  # Pass event_type
+        "description": generate_random_description(event_type),  # Pass event_type
     }
 
 
-
-#=================================== INVALID EVENTS GENERATOR =========================================#
+# =================================== INVALID EVENTS GENERATOR =========================================#
 def generate_invalid_event():
     event = generate_valid_event()
 
     # Chooses the type of corruption
-    corruption = random.choice([
-        "missing_field",
-        "bad_source_ip",
-        "bad_destination_ip",
-        "bad_timestamp",
-        "bad_type"
-    ])
+    corruption = random.choice(
+        [
+            "missing_field",
+            "bad_source_ip",
+            "bad_destination_ip",
+            "bad_timestamp",
+            "bad_type",
+        ]
+    )
 
     # Missing field corruption
     if corruption == "missing_field":
-        missing_field = ["timestamp",  "source_ip", "destination_ip","event_type","severity", "description"]
+        missing_field = [
+            "timestamp",
+            "source_ip",
+            "destination_ip",
+            "event_type",
+            "severity",
+            "description",
+        ]
         event.pop(random.choice(missing_field))
 
-    # Corrupt source ip 
+    # Corrupt source ip
     elif corruption == "bad_source_ip":
         event["source_ip"] = "999.999.999.999"
 
@@ -145,6 +148,3 @@ def generate_invalid_event():
         event["event_type"] = "UNKNOWN_TYPE"
 
     return event
-
-
-

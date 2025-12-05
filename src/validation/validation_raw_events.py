@@ -11,7 +11,7 @@ required_fields = [
     "destination_ip",
     "event_type",
     "severity",
-    "description"
+    "description",
 ]
 
 # Optional metadata fields
@@ -21,7 +21,7 @@ optional_string_fields = [
     "username",
     "application",
     "platform",
-    "vendor"
+    "vendor",
 ]
 
 # Allowed values
@@ -40,7 +40,6 @@ allowed_event_types = {
 }
 
 
-
 # Validates and normalizes an incoming raw security event.
 # Raises ValueError on invalid events.
 # Returns normalized dict on success.
@@ -53,13 +52,11 @@ def validate_raw_event(data):
         if not data:
             raise ValueError("JSON object is empty")
 
-        
         # 2. REQUIRED FIELDS VALIDATION
         missing = [field for field in required_fields if field not in data]
         if missing:
             raise ValueError(f"Missing required fields {missing}")
 
-        
         # 3. OPTIONAL FIELD NORMALIZATION
         for field in optional_string_fields:
             if field in data:
@@ -68,7 +65,6 @@ def validate_raw_event(data):
                 data[field] = data[field].strip().lower()
             else:
                 data[field] = None  # consistent schema for downstream
-
 
         # 4. TYPE VALIDATION (REQUIRED FIELDS)
         if not isinstance(data["event_id"], str):
@@ -92,12 +88,13 @@ def validate_raw_event(data):
         if not isinstance(data["description"], str):
             raise ValueError("description must be a string")
 
-        
         # 5. RAW PAYLOAD VALIDATION
         if "raw_payload" in data:
 
             # Must be dict if provided
-            if data["raw_payload"] is not None and not isinstance(data["raw_payload"], dict):
+            if data["raw_payload"] is not None and not isinstance(
+                data["raw_payload"], dict
+            ):
                 raise ValueError("raw_payload must be a dictionary")
 
             # Max size limit (~50KB)
@@ -112,7 +109,6 @@ def validate_raw_event(data):
                 except Exception:
                     raise ValueError("raw_payload contains non-serializable data")
 
-        
         # 6. NORMALIZATION (REQUIRED FIELDS)
         data["event_id"] = str(data["event_id"]).strip()
         data["timestamp"] = str(data["timestamp"]).strip()
@@ -121,7 +117,6 @@ def validate_raw_event(data):
         data["event_type"] = str(data["event_type"]).strip().lower()
         data["severity"] = str(data["severity"]).strip().lower()
         data["description"] = str(data["description"]).strip()
-
 
         # 7. NON-EMPTY CHECKS
         if not data["event_id"]:
@@ -145,16 +140,16 @@ def validate_raw_event(data):
         if not data["description"]:
             raise ValueError("description does NOT exist")
 
-
         # 8. TIMESTAMP FORMAT VALIDATION
         try:
             parsed_timestamp = datetime.strptime(
                 data["timestamp"], "%Y-%m-%dT%H:%M:%SZ"
             )
         except ValueError:
-            raise ValueError("timestamp must follow ISO-8601 format: YYYY-MM-DDTHH:MM:SSZ")
+            raise ValueError(
+                "timestamp must follow ISO-8601 format: YYYY-MM-DDTHH:MM:SSZ"
+            )
 
-        
         # 9. TIMESTAMP BUSINESS RULES
         parsed_timestamp = parsed_timestamp.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
@@ -165,7 +160,6 @@ def validate_raw_event(data):
         if (now - parsed_timestamp).days > 90:
             raise ValueError("timestamp is older than 90 days")
 
-    
         # 10. IPv4 ADDRESS VALIDATION
         ipv4_pattern = re.compile(
             r"^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\."
@@ -180,14 +174,12 @@ def validate_raw_event(data):
         if not ipv4_pattern.match(data["destination_ip"]):
             raise ValueError(f"Invalid destination_ip format: {data['destination_ip']}")
 
-
         # 11. CATEGORY / SEVERITY VALIDATION
         if data["severity"] not in allowed_severity:
             raise ValueError("Invalid severity type")
 
         if data["event_type"] not in allowed_event_types:
             raise ValueError("Invalid event type")
-
 
         # 12. LENGTH CONSTRAINTS
         if not (1 <= len(data["event_id"]) <= 128):
@@ -208,7 +200,6 @@ def validate_raw_event(data):
         if not (1 <= len(data["description"]) <= 2000):
             raise ValueError("description length must be between 1 and 2000 characters")
 
-
         # 13. ADD NORMALIZATION TIMESTAMP
         data["normalized_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -217,7 +208,3 @@ def validate_raw_event(data):
 
     except Exception:
         raise
-
-
-
-            
