@@ -25,11 +25,14 @@ if not S3_PREFIX_RAW:
 logger = get_logger(__name__)
 
 # SQL insert query for raw.security_logs table
-RAW_INSERT_QUERY = """
+# SQL query
+RAW_INSERT_QUERY="""
 INSERT INTO raw.security_logs (
     event_id,
     event_time,
-    source,
+    source_ip,
+    destination_ip,
+    event_type,
     severity,
     message,
     raw_payload,
@@ -38,7 +41,9 @@ INSERT INTO raw.security_logs (
 VALUES (
     %(event_id)s,
     %(event_time)s,
-    %(source)s,
+    %(source_ip)s,
+    %(destination_ip)s,
+    %(event_type)s,
     %(severity)s,
     %(message)s,
     %(raw_payload)s,
@@ -46,6 +51,8 @@ VALUES (
 )
 ON CONFLICT (event_id) DO NOTHING;
 """
+
+
 
 INGESTION_LOG_INSERT = """
 INSERT INTO raw.ingestion_log (
@@ -147,11 +154,14 @@ def load_raw_events(events, conn):
                 record = {
                     "event_id": event.get("event_id"),
                     "event_time": event.get("timestamp"),
-                    "source": event.get("source_ip"),  # Corrected key
+                    "source_ip": event.get("source_ip"),
+                    "destination_ip": event.get("destination_ip"),
+                    "event_type": event.get("event_type"),
                     "severity": event.get("severity"),
-                    "message": event.get("message", "No message provided"),
+                    "message": event.get("description", "No message provided"),
                     "raw_payload": json.dumps(event)
                 }
+
                 records.append(record)
 
             # Step 8: Insert into database
@@ -192,7 +202,7 @@ def log_ingestion_metadata(conn, s3_key, events, status="success", error_message
             cursor.execute(INGESTION_LOG_INSERT, log_entry)
             conn.commit()
     except Exception as e:
-        logger.error(f"❌ Failed to insert ingestion log: {e}")
+        logger.error(f"Failed to insert ingestion log: {e}")
         conn.rollback()
         raise
 
