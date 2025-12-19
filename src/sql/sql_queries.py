@@ -6,8 +6,9 @@ modules that perform inserts and logging.
 """
 
 # SQL insert query for raw.security_logs table
-RAW_INSERT_QUERY="""
+RAW_INSERT_QUERY = """
 INSERT INTO raw.security_logs (
+    batch_id,
     event_id,
     event_time,
     source_ip,
@@ -19,6 +20,7 @@ INSERT INTO raw.security_logs (
     ingested_at
 )
 VALUES (
+    %(batch_id)s,
     %(event_id)s,
     %(event_time)s,
     %(source_ip)s,
@@ -33,10 +35,11 @@ ON CONFLICT (event_id) DO NOTHING;
 """
 
 
+
 # SQL insert query for raw.ingestion_log table
 INGESTION_LOG_INSERT = """
 INSERT INTO raw.ingestion_log (
-    job_id,
+    batch_id,
     stage,
     source_name,
     s3_key,
@@ -47,7 +50,7 @@ INSERT INTO raw.ingestion_log (
     finished_at
 )
 VALUES (
-    %(job_id)s,
+    %(batch_id)s,
     %(stage)s,
     %(source_name)s,
     %(s3_key)s,
@@ -57,9 +60,10 @@ VALUES (
     %(started_at)s,
     %(finished_at)s
 )
-ON CONFLICT (job_id, stage)
+ON CONFLICT (batch_id, stage)
 DO UPDATE SET
     record_count = EXCLUDED.record_count,
+    s3_key = EXCLUDED.s3_key,
     status = EXCLUDED.status,
     error_message = EXCLUDED.error_message,
     finished_at = EXCLUDED.finished_at;

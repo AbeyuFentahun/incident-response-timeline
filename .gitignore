@@ -42,3 +42,5 @@ docker/airflow/logs/
 *.tar
 *.bak
 
+latest_batch_id.txt
+

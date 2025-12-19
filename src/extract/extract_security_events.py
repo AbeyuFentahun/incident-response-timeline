@@ -29,6 +29,10 @@ logger = get_logger(__name__)
 # Get root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+latest_batch_path = os.path.join(BASE_DIR, "latest_batch_id.txt")
+
+
+
 
 # ENDPOINT FOR API that request will be made to
 url = f"{API_BASE_URL}/events/batch"
@@ -115,6 +119,16 @@ def extract_data(size, fault_rate, batch_id):
         s3_key = f"raw/{batch_id}/{os.path.basename(raw_output_path)}"
         # upload data to s3 bucket
         upload_to_s3(raw_output_path, s3_key)
+
+        with open(latest_batch_path, "w") as f:
+            f.write(batch_id)
+            logger.info(
+
+                "Recorded latest batch_id for downstream loading",
+                extra={"batch_id": batch_id, "path": latest_batch_path},
+            )
+
+
 
     except Exception:
         logger.error(

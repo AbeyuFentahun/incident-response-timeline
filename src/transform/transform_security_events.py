@@ -98,6 +98,7 @@ def load_raw_events_from_s3():
         test_s3_connection()
     except Exception as e:
         logger.error(f"Unexpected error occurred: {e}")
+        raise
 
 
     try:
@@ -111,6 +112,11 @@ def load_raw_events_from_s3():
     if not contents:
         logger.error("No files found in S3 under the given prefix.")
         raise ValueError(f"No data files found under prefix '{S3_PREFIX_RAW}' — aborting.")
+
+    
+    
+    
+
 
     
 

@@ -3,7 +3,6 @@
 import os
 import json
 from datetime import datetime, timezone
-import uuid
 from json import JSONDecodeError
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
@@ -16,6 +15,7 @@ from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnect
 load_dotenv("config/.env")
 S3_BUCKET = os.getenv("S3_BUCKET")
 S3_PREFIX_RAW = os.getenv("S3_PREFIX_RAW")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Validate critical env vars early so we fail fast
 if not S3_BUCKET:
@@ -32,8 +32,9 @@ logger = get_logger(__name__)
 # record builder for each table
 # determines how the data will look before it is inserted into Postgres
 # For raw.security_logs table
-def build_raw_security_log(event: dict) -> dict:
+def build_raw_security_log(event: dict, batch_id: str) -> dict:
     return {
+        "batch_id": batch_id,
         "event_id": event.get("event_id"),
         "event_time": event.get("timestamp"),
         "source_ip": event.get("source_ip"),
@@ -75,30 +76,32 @@ def build_validation_error_record(event: dict, error: Exception) -> dict:
 
 
 # Extract data from s3
-def extract_raw_events_from_s3(s3_prefix):
+def extract_raw_events_from_s3(s3_prefix, batch_id):
+
+    full_prefix = f"{s3_prefix.rstrip('/')}/{batch_id}/"
+
+    logger.info(
+        "Extracting raw batch from S3",
+        extra={"batch_id": batch_id, "prefix": full_prefix},
+    )
+
     try:
-        # Initialize and test S3 client
         s3 = get_s3_client()
         test_s3_connection()
         logger.info("S3 client initialized and connection successful.")
-
     except (NoCredentialsError, EndpointConnectionError, ClientError) as e:
         logger.error(f"AWS connection error: {e}")
         raise
 
-    # List objects under raw/ prefix
-    response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_prefix)
+    response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=full_prefix)
     contents = response.get("Contents")
 
     if not contents:
-        logger.error("No files found in S3 under the given prefix.")
-        raise ValueError(f"No data files found under prefix '{s3_prefix}' — aborting.")
+        raise ValueError(f"No data files found under prefix '{full_prefix}'")
 
+    logger.info(f"Found {len(contents)} files under prefix '{full_prefix}'")
 
-    logger.info(f"Found {len(contents)} files under prefix '{s3_prefix}'.")
-
-    # Filter out ghost files and enforce file size threshold
-    MIN_FILE_SIZE_BYTES = 5 * 1024  # 5KB threshold to skip ghost/corrupt files
+    MIN_FILE_SIZE_BYTES = 5 * 1024
     files = [obj for obj in contents if obj.get("Size", 0) > MIN_FILE_SIZE_BYTES]
     ghost_files = [obj for obj in contents if obj.get("Size", 0) == 0]
 
@@ -106,49 +109,60 @@ def extract_raw_events_from_s3(s3_prefix):
         logger.warning(f"Ghost files skipped: {[f['Key'] for f in ghost_files]}")
 
     if not files:
-        logger.error("Only ghost files or too-small files found.")
-        raise ValueError("No usable files found in S3.")
+        raise ValueError(f"No usable files found for batch {batch_id}")
 
-    # Grab most recent file
-    latest_file = sorted(files, key=lambda x: x["LastModified"], reverse=True)[0]
-    s3_key = latest_file["Key"]
-    logger.info(f"Latest file: {s3_key} (LastModified: {latest_file['LastModified']})")
+    all_events = []
+    s3_keys = []
+    batch_ts = None
 
-    try:
-        # Fetch and decode contents
-        obj = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
-        data = obj["Body"].read().decode("utf-8")
-        logger.info(f"Read {len(data)} bytes from '{s3_key}'")
+    for obj in files:
+        s3_key = obj["Key"]
 
-    except Exception as e:
-        logger.error(f"Error reading S3 object '{s3_key}': {e}")
-        raise
+        try:
+            response = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
+            data = response["Body"].read().decode("utf-8")
+            logger.info(f"Read {len(data)} bytes from '{s3_key}'")
+        except Exception as e:
+            logger.error(f"Error reading S3 object '{s3_key}': {e}")
+            raise
 
-    if not data.strip():
-        raise ValueError(f"S3 file {s3_key} is empty — cannot parse")
+        if not data.strip():
+            raise ValueError(f"S3 file {s3_key} is empty — cannot parse")
 
-    try:
-        # Parse and validate top-level JSON structure
-        data_obj = json.loads(data)
-        if "events" not in data_obj or not isinstance(data_obj["events"], list):
-            raise ValueError(f"'events' key missing or invalid format in JSON file: {s3_key}")
+        try:
+            data_obj = json.loads(data)
 
-        logger.info(f"Parsed {len(data_obj['events'])} events from '{s3_key}'")
+            if "events" not in data_obj or not isinstance(data_obj["events"], list):
+                raise ValueError(f"'events' key missing or invalid format in {s3_key}")
 
-    except (JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as e:
-        logger.error(f"Failed to parse/validate JSON from '{s3_key}': {e}")
-        raise
+        except (JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as e:
+            logger.error(f"Failed to parse/validate JSON from '{s3_key}': {e}")
+            raise
 
-    return data_obj["events"], s3_key
+        payload_batch_id = data_obj.get("batch_id")
+        if payload_batch_id != batch_id:
+            raise ValueError(
+                f"Batch mismatch in {s3_key}: expected {batch_id}, found {payload_batch_id}"
+            )
+
+        if not batch_ts:
+            batch_ts = data_obj.get("batch_ts")
+
+        all_events.extend(data_obj["events"])
+        s3_keys.append(s3_key)
+
+    return batch_id, batch_ts, all_events, s3_keys
+
+
 
 
 # Load extracted data from s3 to postgres 
-def load_events_to_postgres(events, conn, insert_query, record_builder):
+def load_events_to_postgres(events, batch_id, conn, insert_query, record_builder):
     try:
         with conn.cursor() as cursor:
             # Prepare list of records to insert
             # Creates of list of dicts that mapped according to the schema of the table
-            records = [record_builder(event) for event in events]
+            records = [record_builder(event, batch_id) for event in events]
 
             if not records:
                 logger.warning("No records to insert into Postgres.")
@@ -168,7 +182,7 @@ def load_events_to_postgres(events, conn, insert_query, record_builder):
 
 
 # Logs metadata about the current ingestion batch to raw.ingestion_log.
-def log_ingestion_metadata(conn, job_id, stage, s3_key, events, status="SUCCESS", error_message=None):
+def log_ingestion_metadata(conn, batch_id, stage, s3_key, events, status="SUCCESS", error_message=None):
 
 
     source_name = "security_event_api"  # or however you're identifying the source
@@ -178,7 +192,7 @@ def log_ingestion_metadata(conn, job_id, stage, s3_key, events, status="SUCCESS"
     finished_at = datetime.now(timezone.utc)
 
     log_entry = {
-        "job_id": job_id,
+        "batch_id": batch_id,
         "stage": stage,
         "source_name": "security_event_api",
         "s3_key": s3_key,
@@ -204,8 +218,12 @@ def log_ingestion_metadata(conn, job_id, stage, s3_key, events, status="SUCCESS"
 if __name__ == "__main__":
     conn = None
     s3_key = None
+    s3_keys = []          
     events = []
-    job_id = str(uuid.uuid4())
+    with open(os.path.join(BASE_DIR, "latest_batch_id.txt")) as f:
+        batch_id = f.read().strip()
+
+
 
 
 
@@ -213,16 +231,17 @@ if __name__ == "__main__":
         logger.info("Starting S3 → Postgres pipeline")
 
         conn = get_connection()
-        events, s3_key = extract_raw_events_from_s3(S3_PREFIX_RAW)
+        batch_id, batch_ts, events, s3_keys = extract_raw_events_from_s3(S3_PREFIX_RAW, batch_id)
 
-        load_events_to_postgres(events, conn, RAW_INSERT_QUERY, build_raw_security_log)
+
+        load_events_to_postgres(events, batch_id, conn, RAW_INSERT_QUERY, build_raw_security_log)
 
         # SUCCESS log
         log_ingestion_metadata(
             conn,
-            job_id,
+            batch_id,
             stage="raw",
-            s3_key=s3_key,
+            s3_key=",".join(s3_keys),
             events=events,
             status="SUCCESS"
         )
@@ -236,13 +255,14 @@ if __name__ == "__main__":
             try:
                 log_ingestion_metadata(
                     conn,
-                    job_id=job_id,
+                    batch_id=batch_id,
                     stage="raw",
-                    s3_key=s3_key or "UNKNOWN",
+                    s3_key=",".join(s3_keys) if s3_keys else "UNKNOWN",  
                     events=events or [],
                     status="FAILED",
                     error_message=str(e),
                 )
+
             except Exception as log_err:
                 logger.error(f"Failed to write FAILED ingestion_log entry: {log_err}")
 
