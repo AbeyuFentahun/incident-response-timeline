@@ -1,125 +1,213 @@
-# Run this script in the terminal using: python3 -m src.transform.transform_security_events
+# Run this script in terminal: python3 -m src.transform.transform_security_events
 import os
-import re
-import json
-from datetime import datetime
 from dotenv import load_dotenv
+import pandas as pd
+import json
+from datetime import datetime, timezone
+from src.utils.db_connection import get_connection
+from src.utils.aws_client import test_s3_connection, get_s3_client
 from src.utils.logger import get_logger
+from src.validation.validation_raw_events import validate_raw_event
 
-
-# Load environment variables from .env file into memory
-load_dotenv("config/.env")
-
-# Access environmental variables
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-DATA_DIR = os.getenv("DATA_DIR")
-
-# Initialize logging and set up logging level
 logger = get_logger(__name__)
-logger.setLevel(LOG_LEVEL)
+
+# Load env vars into OS memory and access them
+load_dotenv("config/.env")
+S3_BUCKET = os.getenv("S3_BUCKET")
+S3_PREFIX_RAW = os.getenv("S3_PREFIX_RAW")
 
 
-# Dynamically resolve file path
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# Directory path to retrieve raw valid data
-raw_dir_path = os.path.join(BASE_DIR, DATA_DIR, "raw")
-# Directory path to store transformed data
-staging_dir_path = os.path.join(BASE_DIR, DATA_DIR, "staging")
+# 1. Identify where you are pulling from
+LATEST_BATCH_QUERY = """
+SELECT 
+    event_id,
+    event_time,
+    source_ip,
+    destination_ip,
+    event_type,
+    severity,
+    message,
+    raw_payload,
+    ingested_at
+FROM raw.security_logs
+WHERE ingested_at = (
+    SELECT MAX(ingested_at) FROM raw.security_logs
+);
+"""
 
-# Make sure directory exists, if it doesn't create it
-os.makedirs(staging_dir_path, exist_ok=True)
+# 2. INSERT INTO parsed_events
+PARSED_INSERT_QUERY = """
+INSERT INTO staging.parsed_events (
+    event_id,
+    event_time,
+    source_ip,
+    destination_ip,
+    event_type,
+    severity_level,
+    category,
+    normalized_message,
+    processed_at
+) VALUES (
+    %(event_id)s,
+    %(event_time)s,
+    %(source_ip)s,
+    %(destination_ip)s,
+    %(event_type)s,
+    %(severity_level)s,
+    %(category)s,
+    %(normalized_message)s,
+    %(processed_at)s
+);
+"""
 
-# Regex pattern to match timestamps in filenames (YYYYMMDD_HHMMSS)
-pattern = r"\d{8}_\d{6}"
+# 3. INSERT INTO validation_errors
+VALIDATION_ERROR_QUERY = """
+INSERT INTO staging.validation_errors (
+    event_id,
+    event_time,
+    source_ip,
+    destination_ip,
+    raw_event,
+    error_type,
+    error_message,
+    logged_at
+) VALUES (
+    %(event_id)s,
+    %(event_time)s,
+    %(source_ip)s,
+    %(destination_ip)s,
+    %(raw_event)s,
+    %(error_type)s,
+    %(error_message)s,
+    %(logged_at)s
+);
+"""
 
-# Timestamp instance for every file
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def load_raw_events_from_s3():
+    # Fail fast
+    if not S3_BUCKET:
+        raise EnvironmentError("S3_BUCKET is not set")
 
-print(timestamp)
+    if not S3_PREFIX_RAW:
+        raise ValueError("s3_prefix_raw must be provided")
 
 
-# Helper: returns sorted list of timestamped files (newest → oldest)
-def get_timestamped_files(directory_path):
+    # Initialize S3 conneciton and test it
     try:
-        raw_files = [
-            file for file in os.listdir(directory_path) if re.search(pattern, file)
-        ]
+        s3 = get_s3_client()
+        test_s3_connection()
     except Exception as e:
-        logger.error(f"Could not list files in {directory_path}: {e}")
-        return []
+        logger.error(f"Unexpected error occurred: {e}")
 
-    # Makes sure the list isn't empty
-    if not raw_files:
-        logger.error(f"No timestamped files found in {directory_path}")
-        return []
-
-    sorted_raw_files = sorted(
-        raw_files,
-        # Returns the pattern match and turns it into a datetime object
-        key=lambda f: datetime.strptime(re.search(pattern, f).group(), "%Y%m%d_%H%M%S"),
-        reverse=True,
-    )
-
-    return sorted_raw_files
-
-
-def transform_security_events():
-    # Run helper function to get sorted raw files list
-    raw_files = get_timestamped_files(raw_dir_path)
-
-    # Safe guard against empty list
-    if not raw_files:
-        print("No raw files available for transformation.")
-        raise ValueError("No raw files available — transform step aborted.")
-
-    # Find most recent raw files
-    latest_file = raw_files[0]
-    # Dynamically creates raw file path
-    raw_file_path = os.path.join(raw_dir_path, latest_file)
-    # Stores transformed records
-    transformed_records = []
 
     try:
-        with open(raw_file_path, "r", encoding="utf-8") as f:
-            # turn JSON response into Python Object
-            raw_data = json.load(f)
+        response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=S3_PREFIX_RAW)
+    except:
+        logger.error("Failed to list S3 objects", exc_info=True)
+        raise
 
-        # Make sure resposne is a list
-        if not isinstance(raw_data, list):
-            print(
-                f"Expected list of records in {raw_file_path}, but got {type(raw_data)}."
-            )
-            raise ValueError(
-                f"Expected list of records in {raw_file_path}, but got {type(raw_data)}."
-            )
+    contents = response.get("Contents")
 
-        # Fail fast: Make sure list is not empty
-        if len(raw_data) == 0:
-            print(f"No valid records found in {raw_file_path}. Failing fast.")
-            raise ValueError("Zero valid records — transform step aborted.")
+    if not contents:
+        logger.error("No files found in S3 under the given prefix.")
+        raise ValueError(f"No data files found under prefix '{S3_PREFIX_RAW}' — aborting.")
 
-        for record in raw_data:
+    
+
+
+def transform_and_load_security_events():
+    conn = None
+    # Lists to track results
+    valid_events = []
+    invalid_events = []
+
+    try:
+        # Get connection
+        conn = get_connection()
+        cursor = conn.cursor()
+        logger.info("Connected to database.")
+
+        # Load latest file into memory
+        df = pd.read_sql(LATEST_BATCH_QUERY, conn)
+
+
+        if df.empty:
+            logger.error("DataFrame is empty. No records found in latest raw batch.")
+            raise ValueError("No records found in latest raw batch — aborting transform.")
+
+        logger.info(f"Retrieved {len(df)} records from latest raw batch.")
+
+        # Standardize, Clean, Enrich, Validate
+        for _, row in df.iterrows():
+            event_dict = row.to_dict()
+
             try:
-                # TIMESTAMP NORMALIZATION
-                # Extract timestamp (ISO-8601 from EXTRACT step)
-                ts = record["timestamp"]
+                validated = validate_raw_event(event_dict)
+                valid_events.append(validated)
 
-                if ts.endswith("Z"):
-                    ts = ts[:-1] + "+00:00"
-
-                # Convert normalized string → datetime object
-                # This ensures Postgres always gets a valid timestamp
-                event_time = datetime.fromisoformat(ts)
+                # Load valid events into PARSED EVENTS
+                cursor.execute(PARSED_INSERT_QUERY, validated)
 
             except Exception as e:
-                print(f"Error: {e}")
+                invalid_record = {
+                    "event_id": event_dict.get("event_id"),
+                    "event_time": event_dict.get("event_time"),
+                    "source_ip": event_dict.get("source_ip"),
+                    "destination_ip": event_dict.get("destination_ip"),
+                    "raw_event": json.dumps(event_dict, default=str),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "logged_at": datetime.now(timezone.utc)
+                }
+
+                invalid_events.append(invalid_record)
+
+                # Insert into validation_errors table
+                cursor.execute(VALIDATION_ERROR_QUERY, invalid_record)
+
+        conn.commit()
+
+        logger.info(f"{len(valid_events)} valid events inserted into staging.parsed_events.")
+        logger.info(f"{len(invalid_events)} invalid events inserted into staging.validation_errors.")
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Unexpected error occurred: {e}")
+        if conn:
+            conn.rollback()
+            raise
+
+    finally:
+        if conn:
+            conn.close()
+            logger.info("Database connection closed.")
 
 
-# Locate and load the RAW files (from local or S3)
-# Load the JSON file(s) into memory
-# Apply transformation rules (standardize + enrich)
-# Validate the transformed records (staging schema validation)
-# Upload transformed data to the STAGING layer
+
+if __name__ == "__main__":
+    try:
+        logger.info("Starting smoke test for transform_security_events")
+
+        # Run transformation logic
+        transform_and_load_security_events()
+
+        # Basic row count check (optional, comment out if unnecessary)
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM staging.parsed_events;")
+                parsed_count = cur.fetchone()[0]
+
+                cur.execute("SELECT COUNT(*) FROM staging.validation_errors;")
+                error_count = cur.fetchone()[0]
+
+        logger.info(f"Parsed events written: {parsed_count}")
+        logger.info(f"Validation errors written: {error_count}")
+        logger.info("Smoke test completed successfully.")
+
+    except Exception as e:
+        logger.exception("Smoke test failed due to unexpected error")
+        raise
+
+
+
+
+

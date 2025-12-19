@@ -1,8 +1,10 @@
 # Run this script in terminal: python3 -m src.extract.extract_security_events
+# This script will extract data from the API, validate the API response, and then upload it to the s3 raw bucket
 import os
 import requests
 import json
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
 from src.extract.s3_uploader import upload_to_s3
@@ -33,17 +35,20 @@ url = f"{API_BASE_URL}/events/batch"
 # HEADER FOR AUTHORIZED USER / REQUESTS
 headers = {"x-api-key": API_KEY}
 
+batch_id = str(uuid.uuid4())
 
 # Creates directory if it doesn't exist; if it does, ignore
-os.makedirs(os.path.join(BASE_DIR, "data", "raw"), exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "data", "raw", batch_id), exist_ok=True)
 
 
-def extract_data(size, fault_rate):
+
+def extract_data(size, fault_rate, batch_id):
 
     # Timestamp instance for files
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
     # Dynamically resolves file path to data/raw
-    raw_output_path = os.path.join(BASE_DIR, DATA_DIR, "raw", f"raw_events_{timestamp}.json")
+    raw_output_path = os.path.join(BASE_DIR, DATA_DIR, "raw", batch_id, f"raw_events_{timestamp}.json")
 
     # Fast fail
     # Check if query paramters are valid
@@ -86,6 +91,10 @@ def extract_data(size, fault_rate):
 
     # Validate API response
     validate_api_response(data, fault_rate)
+    
+    # Add batch_id, and batch timestamp to 
+    data["batch_id"] = batch_id
+    data["batch_ts"] = timestamp
 
     try:
     # Write data to data/raw/f"raw_events_{timestamp}.json"
@@ -103,7 +112,7 @@ def extract_data(size, fault_rate):
 
 
     try:
-        s3_key = f"raw/{os.path.basename(raw_output_path)}"
+        s3_key = f"raw/{batch_id}/{os.path.basename(raw_output_path)}"
         # upload data to s3 bucket
         upload_to_s3(raw_output_path, s3_key)
 
@@ -118,6 +127,8 @@ def extract_data(size, fault_rate):
     logger.info(
         "Successfully extracted raw events",
         extra={
+            "batch_id": batch_id,
+            "batch_ts": timestamp,
             "path": raw_output_path,
             "s3_key": s3_key,
             "size": data["size"],
@@ -134,7 +145,7 @@ def extract_data(size, fault_rate):
 # Smoke test
 if __name__ == "__main__":
     print("Extracting data from API")
-    data = extract_data(20, .25)
+    data = extract_data(20, .25, batch_id)
     print("Response succesful and Data returned")
     print(data)
 

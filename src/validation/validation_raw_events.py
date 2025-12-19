@@ -5,14 +5,15 @@ import json
 
 # Required fields every event must have
 required_fields = [
-    "event_id",
-    "timestamp",
+    "event_id", 
+    "event_time", 
     "source_ip",
-    "destination_ip",
-    "event_type",
-    "severity",
-    "description",
-]
+    "destination_ip", 
+    "event_type", 
+    "severity", 
+    "message"
+    ]
+
 
 # Optional metadata fields
 optional_string_fields = [
@@ -70,8 +71,8 @@ def validate_raw_event(data):
         if not isinstance(data["event_id"], str):
             raise ValueError("event_id must be a string")
 
-        if not isinstance(data["timestamp"], str):
-            raise ValueError("timestamp must be a string")
+        if not isinstance(data["event_time"], (str, datetime)):
+            raise ValueError("event_time must be a string or datetime")
 
         if not isinstance(data["source_ip"], str):
             raise ValueError("source_ip must be a string")
@@ -85,45 +86,45 @@ def validate_raw_event(data):
         if not isinstance(data["severity"], (str, int)):
             raise ValueError("severity must be a string or integer")
 
-        if not isinstance(data["description"], str):
-            raise ValueError("description must be a string")
+        if not isinstance(data["message"], str):
+            raise ValueError("message must be a string")
 
         # 5. RAW PAYLOAD VALIDATION
-        if "raw_payload" in data:
+        if "raw_payload" in data and data["raw_payload"] is not None:
 
-            # Must be dict if provided
-            if data["raw_payload"] is not None and not isinstance(
-                data["raw_payload"], dict
-            ):
-                raise ValueError("raw_payload must be a dictionary")
-
-            # Max size limit (~50KB)
-            if data["raw_payload"] is not None:
-                if len(str(data["raw_payload"])) > 50000:
-                    raise ValueError("raw_payload is too large")
-
-            # Must be JSON-serializable
-            if data["raw_payload"] is not None:
+            # Handle both dict (already parsed) and string (JSON text)
+            if isinstance(data["raw_payload"], str):
+                # Ensure it's valid JSON text
+                try:
+                    json.loads(data["raw_payload"])
+                except Exception:
+                    raise ValueError("raw_payload is not valid JSON")
+            else:
+                # Must be JSON-serializable (covers dict/object cases)
                 try:
                     json.dumps(data["raw_payload"])
                 except Exception:
                     raise ValueError("raw_payload contains non-serializable data")
 
+            # Max size limit (~50KB)
+            if len(str(data["raw_payload"])) > 50000:
+                raise ValueError("raw_payload is too large")
+
         # 6. NORMALIZATION (REQUIRED FIELDS)
         data["event_id"] = str(data["event_id"]).strip()
-        data["timestamp"] = str(data["timestamp"]).strip()
+        data["event_time"] = str(data["event_time"]).strip()
         data["source_ip"] = str(data["source_ip"]).strip()
         data["destination_ip"] = str(data["destination_ip"]).strip()
         data["event_type"] = str(data["event_type"]).strip().lower()
         data["severity"] = str(data["severity"]).strip().lower()
-        data["description"] = str(data["description"]).strip()
+        data["message"] = str(data["message"]).strip()
 
         # 7. NON-EMPTY CHECKS
         if not data["event_id"]:
             raise ValueError("event_id does NOT exist")
 
-        if not data["timestamp"]:
-            raise ValueError("timestamp does NOT exist")
+        if not data["event_time"]:
+            raise ValueError("event_time does NOT exist")
 
         if not data["source_ip"]:
             raise ValueError("source_ip does NOT exist")
@@ -137,18 +138,27 @@ def validate_raw_event(data):
         if not data["severity"]:
             raise ValueError("severity does NOT exist")
 
-        if not data["description"]:
-            raise ValueError("description does NOT exist")
+        if not data["message"]:
+            raise ValueError("message does NOT exist")
 
-        # 8. TIMESTAMP FORMAT VALIDATION
+        # ----------------------------------------------------
+        # 8. FIXED TIMESTAMP FORMAT VALIDATION
+        # ----------------------------------------------------
         try:
-            parsed_timestamp = datetime.strptime(
-                data["timestamp"], "%Y-%m-%dT%H:%M:%SZ"
-            )
-        except ValueError:
-            raise ValueError(
-                "timestamp must follow ISO-8601 format: YYYY-MM-DDTHH:MM:SSZ"
-            )
+            raw_ts = str(data["event_time"]).strip()
+
+            # Normalize common formats
+            if raw_ts.endswith("Z"):
+                raw_ts = raw_ts.replace("Z", "+00:00")
+
+            # If there's no timezone at all, add UTC
+            if "+" not in raw_ts and "T" in raw_ts:
+                raw_ts = raw_ts + "+00:00"
+
+            parsed_timestamp = datetime.fromisoformat(raw_ts)
+
+        except Exception:
+            raise ValueError(f"Invalid event_time format: {data['event_time']}")
 
         # 9. TIMESTAMP BUSINESS RULES
         parsed_timestamp = parsed_timestamp.replace(tzinfo=timezone.utc)
@@ -197,14 +207,32 @@ def validate_raw_event(data):
         if not (1 <= len(data["severity"]) <= 10):
             raise ValueError("severity length must be between 1 and 10 characters")
 
-        if not (1 <= len(data["description"]) <= 2000):
-            raise ValueError("description length must be between 1 and 2000 characters")
+        if not (1 <= len(data["message"]) <= 2000):
+            raise ValueError("message length must be between 1 and 2000 characters")
 
         # 13. ADD NORMALIZATION TIMESTAMP
         data["normalized_at"] = datetime.now(timezone.utc).isoformat()
+
+        # 14. ENRICHMENT FOR TRANSFORMATION PHASE
+        # These fields are required by PARSED_INSERT_QUERY
+
+        # Severity level (same as normalized severity)
+        data["severity_level"] = data["severity"]
+
+        # Category — derived from event_type
+        # You can refine this later, but this will let the pipeline run
+        data["category"] = data["event_type"]
+
+        # Normalized message (strip/clean the message)
+        data["normalized_message"] = data["message"].strip()
+
+        # Timestamp when transform occurred
+        data["processed_at"] = datetime.now(timezone.utc)
+
 
         # Finished
         return data
 
     except Exception:
         raise
+

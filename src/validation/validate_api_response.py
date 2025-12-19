@@ -1,4 +1,3 @@
-import os
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
 
@@ -16,7 +15,8 @@ logger = get_logger(__name__)
 
 
 def validate_api_response(data, fault_rate):
-        # Make sure response is a dictionary
+
+    # Make sure response is a dictionary
     if not isinstance(data, dict):
         raise ValueError(f"Data needs to be an object. Current Data Type is: {type(data)}")
     
