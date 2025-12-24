@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from json import JSONDecodeError
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
+from src.transform.schema_definitions import build_raw_security_log
 from src.utils.aws_client import get_s3_client, test_s3_connection
 from src.utils.db_connection import get_connection
 from src.sql.sql_queries import RAW_INSERT_QUERY, INGESTION_LOG_INSERT
@@ -26,52 +27,6 @@ if not S3_PREFIX_RAW:
 # Initialize logger
 logger = get_logger(__name__)
 
-
-
-
-# record builder for each table
-# determines how the data will look before it is inserted into Postgres
-# For raw.security_logs table
-def build_raw_security_log(event: dict, batch_id: str) -> dict:
-    return {
-        "batch_id": batch_id,
-        "event_id": event.get("event_id"),
-        "event_time": event.get("timestamp"),
-        "source_ip": event.get("source_ip"),
-        "destination_ip": event.get("destination_ip"),
-        "event_type": event.get("event_type"),
-        "severity": event.get("severity"),
-        "message": event.get("description") or "No message provided",
-        "raw_payload": json.dumps(event, default=str),
-        # ingested_at is handled by DEFAULT / CURRENT_TIMESTAMP in SQL
-    }
-
-# For staging.parsed_events table
-def build_staging_parsed_event(event: dict) -> dict:
-    return {
-        "event_id": event["event_id"],
-        "event_time": event["event_time"],
-        "source_ip": event["source_ip"],
-        "destination_ip": event["destination_ip"],
-        "event_type": event["event_type"],
-        "severity_level": event["severity_level"],
-        "category": event["category"],
-        "normalized_message": event["normalized_message"],
-        "processed_at": event.get("processed_at") or datetime.now(timezone.utc),
-    }
-
-# For staging.validation_errors table
-def build_validation_error_record(event: dict, error: Exception) -> dict:
-    return {
-        "event_id": event.get("event_id"),
-        "event_time": event.get("event_time"),
-        "source_ip": event.get("source_ip"),
-        "destination_ip": event.get("destination_ip"),
-        "raw_event": json.dumps(event),
-        "error_type": type(error).__name__,
-        "error_message": str(error),
-        "logged_at": datetime.now(timezone.utc),
-    }
 
 
 
@@ -101,8 +56,11 @@ def extract_raw_events_from_s3(s3_prefix, batch_id):
 
     logger.info(f"Found {len(contents)} files under prefix '{full_prefix}'")
 
+    # Minimum file size to deal with ghost files
     MIN_FILE_SIZE_BYTES = 5 * 1024
+    # Make sure files pass the minimum size
     files = [obj for obj in contents if obj.get("Size", 0) > MIN_FILE_SIZE_BYTES]
+    # To see if there ghost files in our bucket
     ghost_files = [obj for obj in contents if obj.get("Size", 0) == 0]
 
     if ghost_files:
@@ -116,6 +74,7 @@ def extract_raw_events_from_s3(s3_prefix, batch_id):
     batch_ts = None
 
     for obj in files:
+        # Grab the key for the object in the ob
         s3_key = obj["Key"]
 
         try:
@@ -138,16 +97,21 @@ def extract_raw_events_from_s3(s3_prefix, batch_id):
         except (JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as e:
             logger.error(f"Failed to parse/validate JSON from '{s3_key}': {e}")
             raise
-
+        
+        # Make sure that the batch_id matches up with the current object in the respective s3 bucket
         payload_batch_id = data_obj.get("batch_id")
         if payload_batch_id != batch_id:
             raise ValueError(
                 f"Batch mismatch in {s3_key}: expected {batch_id}, found {payload_batch_id}"
             )
 
+        # Make sure we have the batch timestamp
         if not batch_ts:
             batch_ts = data_obj.get("batch_ts")
 
+        # .extend() iterates over its argument and adds each element individually
+        # .extend() is used to loop through the list of objects and add each object to the list individually as it own element
+        # .append() would add the whole list as a single element in the list
         all_events.extend(data_obj["events"])
         s3_keys.append(s3_key)
 
@@ -265,7 +229,6 @@ if __name__ == "__main__":
 
             except Exception as log_err:
                 logger.error(f"Failed to write FAILED ingestion_log entry: {log_err}")
-
 
         raise  # re-raise exception so Airflow sees failure
 

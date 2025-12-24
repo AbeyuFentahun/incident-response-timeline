@@ -1,4 +1,5 @@
 # Run this script in the terminal using: python3 -m src.extract.s3_uploader
+# This file will upload the extracted data from the API into s3 raw bucket and into the data/raw directory
 import os
 from dotenv import load_dotenv
 from botocore.exceptions import ClientError

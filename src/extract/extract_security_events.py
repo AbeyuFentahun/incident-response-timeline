@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 # Get root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Dynamically create path to grab the latest batch_id from the .txt file
 latest_batch_path = os.path.join(BASE_DIR, "latest_batch_id.txt")
 
 

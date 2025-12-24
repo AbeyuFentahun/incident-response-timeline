@@ -1,13 +1,15 @@
 # Run this script in terminal: python3 -m src.transform.transform_security_events
 import os
 from dotenv import load_dotenv
-import pandas as pd
-import json
 from datetime import datetime, timezone
 from src.utils.db_connection import get_connection
-from src.utils.aws_client import test_s3_connection, get_s3_client
+from src.load.from_s3_to_postgres import extract_raw_events_from_s3
+from src.transform.schema_definitions import build_raw_security_log, build_staging_parsed_event, build_validation_error_record
 from src.utils.logger import get_logger
-from src.validation.validation_raw_events import validate_raw_event
+from src.transform.validate_transform import validate_transformation
+from src.validation.validation_raw_events import canonicalize_event, validate_event, normalize_event
+from src.transform.s3_batch_writer import transformed_batch_to_s3
+from src.sql.sql_queries import PARSED_INSERT_QUERY, VALIDATION_ERROR_QUERY
 
 logger = get_logger(__name__)
 
@@ -17,203 +19,154 @@ S3_BUCKET = os.getenv("S3_BUCKET")
 S3_PREFIX_RAW = os.getenv("S3_PREFIX_RAW")
 
 
-# 1. Identify where you are pulling from
-LATEST_BATCH_QUERY = """
-SELECT 
-    event_id,
-    event_time,
-    source_ip,
-    destination_ip,
-    event_type,
-    severity,
-    message,
-    raw_payload,
-    ingested_at
-FROM raw.security_logs
-WHERE ingested_at = (
-    SELECT MAX(ingested_at) FROM raw.security_logs
-);
-"""
+# Dynamical resolve file paths
+# Get root directory
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 2. INSERT INTO parsed_events
-PARSED_INSERT_QUERY = """
-INSERT INTO staging.parsed_events (
-    event_id,
-    event_time,
-    source_ip,
-    destination_ip,
-    event_type,
-    severity_level,
-    category,
-    normalized_message,
-    processed_at
-) VALUES (
-    %(event_id)s,
-    %(event_time)s,
-    %(source_ip)s,
-    %(destination_ip)s,
-    %(event_type)s,
-    %(severity_level)s,
-    %(category)s,
-    %(normalized_message)s,
-    %(processed_at)s
-);
-"""
+# Dynamically create path to grab the latest batch_id from the .txt file
+latest_batch_path = os.path.join(BASE_DIR, "latest_batch_id.txt")
 
-# 3. INSERT INTO validation_errors
-VALIDATION_ERROR_QUERY = """
-INSERT INTO staging.validation_errors (
-    event_id,
-    event_time,
-    source_ip,
-    destination_ip,
-    raw_event,
-    error_type,
-    error_message,
-    logged_at
-) VALUES (
-    %(event_id)s,
-    %(event_time)s,
-    %(source_ip)s,
-    %(destination_ip)s,
-    %(raw_event)s,
-    %(error_type)s,
-    %(error_message)s,
-    %(logged_at)s
-);
-"""
-
-def load_raw_events_from_s3():
-    # Fail fast
-    if not S3_BUCKET:
-        raise EnvironmentError("S3_BUCKET is not set")
-
-    if not S3_PREFIX_RAW:
-        raise ValueError("s3_prefix_raw must be provided")
+with open(os.path.join(BASE_DIR, "latest_batch_id.txt")) as f:
+    batch_id = f.read().strip()
 
 
-    # Initialize S3 conneciton and test it
+def run_transform_for_batch(batch_id: str):
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    valid_s3_key = f"staging/{batch_id}/valid_events_{timestamp}.json"
+    invalid_s3_key = f"dead_letter/{batch_id}/invalid_events_{timestamp}.json"
+
+    # Extract batch from S3 
     try:
-        s3 = get_s3_client()
-        test_s3_connection()
+        payload_batch_id, batch_ts, all_events, s3_keys = extract_raw_events_from_s3(S3_PREFIX_RAW, batch_id)
+        logger.info(
+            "Starting transform for batch",
+            extra={
+                "batch_id": batch_id,
+                "total_events": len(all_events),
+                "s3_objects": len(s3_keys),
+                },
+            )
+
     except Exception as e:
-        logger.error(f"Unexpected error occurred: {e}")
+        logger.error(f"S3 extraction failed for batch_id={batch_id}: {e}")
         raise
 
-
-    try:
-        response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=S3_PREFIX_RAW)
-    except:
-        logger.error("Failed to list S3 objects", exc_info=True)
-        raise
-
-    contents = response.get("Contents")
-
-    if not contents:
-        logger.error("No files found in S3 under the given prefix.")
-        raise ValueError(f"No data files found under prefix '{S3_PREFIX_RAW}' — aborting.")
-
-    
-    
-    
-
-
-    
-
-
-def transform_and_load_security_events():
     conn = None
-    # Lists to track results
+    cursor = None
+    valid_count = 0
+    invalid_count = 0
+    # These list will be uploaded into respective s3 buckets
+    # Store valid events
     valid_events = []
+    # Store invalid events
     invalid_events = []
 
     try:
-        # Get connection
+        # Set up DB connection
         conn = get_connection()
         cursor = conn.cursor()
-        logger.info("Connected to database.")
+        logger.info("Database connection established")
 
-        # Load latest file into memory
-        df = pd.read_sql(LATEST_BATCH_QUERY, conn)
-
-
-        if df.empty:
-            logger.error("DataFrame is empty. No records found in latest raw batch.")
-            raise ValueError("No records found in latest raw batch — aborting transform.")
-
-        logger.info(f"Retrieved {len(df)} records from latest raw batch.")
-
-        # Standardize, Clean, Enrich, Validate
-        for _, row in df.iterrows():
-            event_dict = row.to_dict()
-
+        # Per-event processing for canonicalization, validation, & normalization
+        for raw_event in all_events:
             try:
-                validated = validate_raw_event(event_dict)
-                valid_events.append(validated)
+                # Build canonical raw event (API → pipeline schema)
+                canonical_event = build_raw_security_log(raw_event, batch_id)
 
-                # Load valid events into PARSED EVENTS
-                cursor.execute(PARSED_INSERT_QUERY, validated)
+                logger.info(
+                    "Built canonical raw event",
+                    extra={"event_id": raw_event.get("event_id"), "batch_id": batch_id},
+                    )
+                
+                # Canonicalize values (strip, lowercase, normalize timestamp)
+                canonical_event = canonicalize_event(canonical_event)
+
+                # Validate canonical schema
+                validate_event(canonical_event)
+
+                # Normalize (adds severity_level, category, normalized_message)
+                canonical_event = normalize_event(canonical_event)
+                logger.info(
+                    "Canonical event validated and normalized",
+                    extra={"event_id": canonical_event.get("event_id")},
+                    )
+
+                # Build staging record
+                parsed_event = build_staging_parsed_event(canonical_event)
+
+                # Validate transformation happened correctly
+                validate_transformation(canonical_event)
+
+                valid_events.append(parsed_event)
+                valid_count += 1
+
+                logger.info(
+                    "Event validated successfully",
+                    extra={"event_id": canonical_event.get("event_id")},
+                )
+
 
             except Exception as e:
-                invalid_record = {
-                    "event_id": event_dict.get("event_id"),
-                    "event_time": event_dict.get("event_time"),
-                    "source_ip": event_dict.get("source_ip"),
-                    "destination_ip": event_dict.get("destination_ip"),
-                    "raw_event": json.dumps(event_dict, default=str),
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "logged_at": datetime.now(timezone.utc)
-                }
+                logger.warning(
+            "Event failed validation",
+            extra={
+                "event_id": raw_event.get("event_id"),
+                "error": str(e),
+            },
+        )
+                error_record = build_validation_error_record(canonical_event, e)
+                invalid_events.append(error_record)
+                invalid_count += 1
 
-                invalid_events.append(invalid_record)
 
-                # Insert into validation_errors table
-                cursor.execute(VALIDATION_ERROR_QUERY, invalid_record)
+                # Will implement upload to S3 dead_letter later
 
+
+        # Will implement upload to S3 staging later
+        transformed_batch_to_s3(valid_events, S3_BUCKET, valid_s3_key)
+        transformed_batch_to_s3(invalid_events, S3_BUCKET, invalid_s3_key)
+
+        for event in valid_events:
+            cursor.execute(PARSED_INSERT_QUERY, event)
+
+        for error_record in invalid_events:
+            cursor.execute(VALIDATION_ERROR_QUERY, error_record)
+
+        # Commit once per batch
         conn.commit()
-
-        logger.info(f"{len(valid_events)} valid events inserted into staging.parsed_events.")
-        logger.info(f"{len(invalid_events)} invalid events inserted into staging.validation_errors.")
+        logger.info(
+            "Transform completed",
+            extra={
+                "batch_id": batch_id,
+                "valid_events": valid_count,
+                "invalid_events": invalid_count,
+                "s3_keys": s3_keys,
+            },
+        )
 
     except Exception as e:
-        logger.error(f"Unexpected error occurred: {e}")
         if conn:
             conn.rollback()
-            raise
+        logger.error(f"Transform failed for batch_id={batch_id}: {e}")
+        raise
 
     finally:
+        if cursor:
+            cursor.close()
         if conn:
             conn.close()
-            logger.info("Database connection closed.")
+
+    
+
 
 
 
 if __name__ == "__main__":
     try:
-        logger.info("Starting smoke test for transform_security_events")
-
-        # Run transformation logic
-        transform_and_load_security_events()
-
-        # Basic row count check (optional, comment out if unnecessary)
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM staging.parsed_events;")
-                parsed_count = cur.fetchone()[0]
-
-                cur.execute("SELECT COUNT(*) FROM staging.validation_errors;")
-                error_count = cur.fetchone()[0]
-
-        logger.info(f"Parsed events written: {parsed_count}")
-        logger.info(f"Validation errors written: {error_count}")
-        logger.info("Smoke test completed successfully.")
-
+        logger.info(f"Starting to extract from s3 raw bucket")
+        run_transform_for_batch(batch_id)
+        logger.info("Transformation phase completed successfully!")
+    
     except Exception as e:
-        logger.exception("Smoke test failed due to unexpected error")
-        raise
-
-
-
-
+        logger.error(f"Unexpected Error Occured: {e}")
 
