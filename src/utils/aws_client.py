@@ -81,7 +81,7 @@ def create_s3_structure():
     S3_BUCKET = os.getenv("S3_BUCKET")
 
     # List of folders that need to be created in s3 bucket
-    folders = ["raw/", "staging/", "archive/", "dead_letter/"]
+    folders = ["raw/", "staging/", "archive/", "dead_letter/", "analytics/"]
 
     try:
         # Loops through folders list
